@@ -1,82 +1,130 @@
 # CenterNetDetector
 
-Object detection training with CenterNet heads on **YOLO-format** datasets (Ultralytics-style `dataset.yaml` + `.txt` labels). Backbones via **timm** (CNN) or **transformers** (ViT/DINO-class). Training and inference are driven by YAML config (similar workflow to Ultralytics: one CLI + edits in `configs/`).
+Обучение детекции объектов с **голова в стиле CenterNet**: теплокарты по классам, регрессия размера (width/height) и смещения центра. В качестве **бэкбона** используется **DINOv2** из Hugging Face Transformers (`Dinov2Model`), признаки патч-токенов переформируются в карту признаков и доинтерполируются до шага `img_stride`.
 
-## Install
+## Стек и зависимости
 
-```
+Основные пакеты: PyTorch, torchvision, **transformers** (DINOv2), OpenCV, PyYAML, tqdm, torchmetrics.
+
+Установка (из корня репозитория):
+
+```bash
 pip install -r requirements.txt
 ```
 
-Run commands from the project directory so paths like `configs/default.yaml` resolve.
+## Архитектура модели
 
-## Dataset layout
+| Компонент | Реализация |
+|-----------|------------|
+| **Бэкбон** | `Dinov2Model.from_pretrained(...)`, по умолчанию `facebook/dinov2-small` (см. [`model.py`](model.py)). Патчи **14×14** пикселей; в forward используются **все токены после первого** (`tok[:, 1:, :]`), сетка `H // 14 × W // 14`. |
+| **Голова** | `CenterNetHead`: общий свёрточный ствол + три ветки — heatmap (sigmoid), wh (`softplus`), offset (линейная). Шаг карты признаков относительно входа задаётся `img_stride` (по умолчанию **4**, т.е. карта ~160×160 при `imgsz=640`). |
+| **Лосс** | Focal-подобная функция для heatmap + L1 по wh и offset в точках центров объектов на карте (`model.py`). |
 
-Your `dataset.yaml`:
+При создании модели у бэкбона выставляется `requires_grad=False` (**заморозка весов DINOv2**); в оптимизаторе параметры бэкбона всё равно перечислены, но без градиентов они **фактически не обновляются** — учится голова сетки.
 
-- `path` — dataset root (images + labels tree). If it points to another PC, override with `data.root_override` in the training YAML.
-- `train:` / `val:` — folders under root with images (e.g. `train/images`).
-- Labels live under the parallel `labels/` tree (`train/labels/` with `.txt` per image, same relative path).
+Параграф секции `backbone` в [`configs/default.yaml`](configs/default.yaml) отражает желаемую конфигурацию, но **текущий `train.py` не читает эти поля**: имя модели DINOv2 задаётся в коде класса [`DinoV2CenterNet`](model.py) (аргумент `dino_name`), чтобы другой checkpoint подключить — правьте вызов в `train.py` / конструктор либо расширяйте загрузку из YAML.
 
-Each label line: `class_id cx cy w h` (normalized YOLO format).
+## Формат данных
 
-The default training config assumes [detection_dataset_yolo/dataset.yaml](detection_dataset_yolo/dataset.yaml) and sets `root_override` to `detection_dataset_yolo` so images resolve locally.
+Проект ожидает датасет в **YOLO-подобном** виде и YAML с метаданными (как в экосистеме Ultralytics).
 
-## Train
+### Файл `dataset.yaml`
 
-```
-python -m src.train --cfg configs/default.yaml --data detection_dataset_yolo/dataset.yaml
-```
+- **`path`** — корень набора данных (папка с `train`/`valid`/…).
+- **`train`** / **`val`** — подпути к изображениям **относительно** `path` (например `train/images`, `valid/images`).
+- **`nc`** — число классов.
+- **`names`** — имена классов: список или словарь `{индекс: имя}`.
 
-Optional flags: `--device cpu`, `--epochs 10`, `--seed 42`.
+Если YAML с другой машины ссылается на чужой `path`, в учебном конфиге можно задать переопределение корня через `data.root_override` (локальная папка относительно корня проекта). См. [`configs/default.yaml`](configs/default.yaml) и функцию [`resolve_dataset`](train.py).
 
-Artifacts under `runs/<name>_<timestamp>/`:
+### Дерево папок (поддерживаются два варианта)
 
-- `best.pt` — highest validation metric (`train.monitor_metric`, default mean mAP@[0.5:0.95]); `meta.val_metrics` logged each epoch when that score improves. Holds `ema_model` when weight EMA is enabled.
-- `last.pt` — most recent epoch
-- Checkpoints contain `model`, optional `ema_model`, `optimizer`, nested `config`, `meta`
-
-- `metrics.json` — mAP@0.50 and mAP averaged over configurable IoUs (defaults to COCO [0.5:0.05:0.95])
-- Per-class PNGs: Precision–Recall curve (`pr_curve_class_*.png`) and Precision/Recall versus confidence (`precision_recall_vs_conf_class_*.png`)
-- `train_loss.png`, plus `config_used.yaml` snapshot
-
-## Inference
+**Вариант 1:** split внутри корня
 
 ```
-python -m src.predict --weights runs/exp_YYYYMMDD_HHMMSS/best.pt --source path/to/img_or_folder --out predictions --ema
+<root>/train/images/<name>.jpg
+<root>/train/labels/<name>.txt
+<root>/valid/images/...
+<root>/valid/labels/...
 ```
 
-Use `--ema` to load smoothed weights from `ema_model` when the checkpoint includes them.
+Валидация в коде запрашивает split `valid`; в `dataset.yaml` часто поле называется `val:` — нужна папка `valid/` на диске или доработка кода под имя `val`.
 
-### Augmentations (train only)
+**Вариант 2:** общие каталоги `images` / `labels`
 
-See `augment` in [configs/default.yaml](configs/default.yaml):
+```
+<root>/images/train/<name>.jpg
+<root>/labels/train/<name>.txt
+```
 
-- Random grayscale, color jitter
-- Random resized crop (scaled relative to fixed `imgsz`, boxes updated via torchvision v2)
-- Batch **CutMix** (paste cropped region from another image in the batch, merge intersecting GT boxes into the pasted patch)
+То же для `valid`.
 
-Disable all training augmentations with `augment.enabled: false`. CutMix alone off: `augment.cutmix.enabled: false`.
+Изображения: расширения `.jpg`, `.jpeg`, `.png`, `.bmp`, `.webp`.
 
-### EMA weights
+### Файлы разметки `.txt`
 
-`train.weight_ema_decay` (default `0.9999`) maintains a shadow copy averaged after each optimizer step; set to `0.0` to disable. Validation each epoch uses the **EMA weights** when EMA is on. Inference can use `--ema` to load the saved shadow.
+Одна строка — один объект:
 
-### Backbone selection
+```
+class_id cx cy w h
+```
 
-Edit [configs/default.yaml](configs/default.yaml):
+Все координаты и размеры **нормализованы** в [0, 1]: центр ограничивающего прямоугольника и ширина/высота относительно **исходного** изображения (до letterbox).
 
-- CNN: `backbone.type: cnn`, `backbone.name: resnet50` (or another timm model supporting `features_only`).
-- ViT: `backbone.type: vit`, `backbone.name` = Hugging Face model id; tune `vit_patch_size` / `vit_num_prefix_tokens`.
+Пример демо-конфигурации: [`detection_dataset_yolo/dataset.yaml`](detection_dataset_yolo/dataset.yaml).
 
-## Config reference
+## Препроцессинг
 
-| Section | Role |
-|---------|------|
-| `data` | `dataset_yaml`, optional `root_override` |
-| `preprocess` | `imgsz`, ImageNet `mean` / `std` |
-| `augment` | grayscale, jitter, resized crop; `cutmix` prob/beta |
-| `backbone` | `type`, `name`, `pretrained`, ViT sizing |
-| `model` | `img_stride`, `heatmap_bias_init`, focal and Gaussian overlap |
-| `train` | batch size, epochs, LR, `ema_alpha` (loss display), `weight_ema_decay` (weights), `monitor_metric` (`map_50` or `map_50_95`), `freeze_backbone_epochs` |
-| `metrics` | `map_iou_thresholds`, evaluation confidence, `topk_inference`, `pr_curve_metric_iou` |
+- На вход модели после даталоадера изображение нормализуется **ImageNet** `mean` / `std` из конфига (см. `preprocess` в YAML); размер задаётся `preprocess.imgsz` (**letterbox** до квадрата, см. [`dataset.py`](dataset.py)).
+
+## Обучение
+
+Из корня проекта:
+
+```bash
+python train.py --config configs/default.yaml
+```
+
+Путь к `dataset.yaml` и опционально `root_override` берутся из секции **`data`** в том же конфиге. Устройство: `train.device` (при недоступном CUDA указанное `cuda` сбросится на CPU в коде).
+
+Сохраняются чекпоинты под каталог `outputs.project` / `outputs.name` (по умолчанию `runs/exp`): **`best.pt`** (лучший по **mAP@0.50** на валидации) и **`last.pt`**.
+
+В Checkpoint: `model`, `ema_model`, `optimizer`, `scheduler`, `epoch`, `metrics`, `names`.
+
+EMA обновляется через `torch.optim.swa_utils.AveragedModel` в каждую эпоху валидации вызывается модель **`ema_model`**.
+
+## Инференс
+
+```bash
+python inference.py --weights runs/exp/best.pt --source path/to/image_or_dir --out path/to/output --imgsz 640 --conf 0.1 --topk 100 --device cuda
+```
+
+Рисуются боксы на исходном изображении с учётом letterbox и отображения координат обратно в оригинальный размер.
+
+## Конфигурация (`configs/default.yaml`)
+
+| Секция | Назначение |
+|--------|------------|
+| `data` | `dataset_yaml`, `root_override` |
+| `preprocess` | `imgsz`, `mean`, `std` |
+| `augment` | в текущей версии **не подключено** к `train.py` (зарезервировано) |
+| `backbone` | задумано под выбор модели; **пока только в YAML**, без автоподключения в коде |
+| `model` | `img_stride`, bias heatmap, параметры focal / gaussian |
+| `train` | эпохи, batch, LR, seed, device, EMA-связанные константы в скрипте |
+| `metrics` | порог для eval, `topk_inference`, список IoU для torchmetrics MAP |
+| `outputs` | куда писать `runs` и имя эксперимента |
+
+## Структура репозитория (основное)
+
+| Файл | Роль |
+|------|------|
+| `train.py` | цикл обучения, метрики MAP, сохранение чекпоинтов |
+| `inference.py` | прогон по изображениям и визуализация |
+| `model.py` | DINOv2 + CenterNetHead, loss, decode пиков |
+| `dataset.py` | `YOLODataset`, letterbox, collate |
+| `loss.py` | фокальный лосс для heatmap |
+| `utils.py` | гауссианы для целевых карт |
+
+## Лицензия
+
+См. файл [`LICENSE`](LICENSE).

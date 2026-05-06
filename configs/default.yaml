@@ -3,31 +3,6 @@ data:
   root_override: detection_dataset_yolo
   dataset_yaml: detection_dataset_yolo/dataset.yaml
 
-preprocess:
-  imgsz: 640
-  mean: [0.485, 0.456, 0.406]
-  std: [0.229, 0.224, 0.225]
-
-augment:
-  enabled: true
-  random_grayscale_p: 0.1
-  sanitize_min_box_side_px: 2.0
-  color_jitter:
-    brightness: 0.2
-    contrast: 0.2
-    saturation: 0.2
-    hue: 0.05
-  random_resized_crop:
-    enabled: true
-    scale_min: 0.8
-    scale_max: 1.0
-    ratio_min: 0.9
-    ratio_max: 1.1
-  cutmix:
-    enabled: true
-    prob: 0.5
-    beta: 1.0
-
 backbone:
   type: vit
   name: facebook/dinov2-small
