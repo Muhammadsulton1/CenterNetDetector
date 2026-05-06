@@ -1,0 +1,10 @@
+path: detection_dataset_yolo
+train: train/images
+val: valid/images
+test: test/images
+nc: 4
+names:
+  0: metal
+  1: wood
+  2: trash
+  3: smoke
