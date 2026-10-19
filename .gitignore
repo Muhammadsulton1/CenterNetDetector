@@ -3,3 +3,5 @@
 *.png
 *.jpg
 detection_dataset_yolo
+runs/
+*.egg-info/

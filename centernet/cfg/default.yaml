@@ -1,0 +1,51 @@
+# Значения по умолчанию; любой ключ переопределяется как `centernet train key=value`
+model: facebook/dinov2-small   # имя DINOv2 с HuggingFace или путь к .pt
+data:                          # путь к dataset.yaml (формат Ultralytics)
+source:                        # predict: файл или папка с картинками
+resume: false                  # true или путь к last.pt: продолжить прерванное обучение
+
+epochs: 100
+patience: 50                    # остановка, если map50-95 не росла столько эпох (0 - выключено)
+batch: 16                      # -1: подобрать под память GPU (~85% от максимума)
+nbs: 16                        # номинальный batch; accumulation = nbs // batch
+imgsz: 640
+workers: 4
+device: cuda                   # при отсутствии CUDA используется cpu
+amp: true                      # смешанная точность float16 на CUDA (быстрее и меньше памяти)
+seed: 42
+fraction: 1.0                  # доля train/val, для быстрых прогонов
+
+lr0: 1.0e-4                    # стартовый lr головы (после разогрева)
+lrf: 0.01                      # конечный lr = lr0 * lrf (и lr_backbone * lrf)
+cos_lr: false                  # true - косинусный спад, false - линейный (как в Ultralytics)
+warmup_epochs: 3.0             # линейный разогрев lr от 0 по шагам оптимизатора
+lr_backbone: 5.0e-6
+freeze_epochs: -1              # -1: бэкбон заморожен всегда; N: обучать голову N эпох, затем и бэкбон (0 - сразу)
+weight_decay: 1.0e-4
+ema_decay: 0.999
+img_stride: 4
+feature_layers: 4              # ViT: сколько слоёв склеивать (равномерно, включая последний); 1 = только последний
+
+# аугментации (как в Ultralytics), только для train
+mosaic: 1.0                    # вероятность mosaic из 4 картинок
+close_mosaic: 10               # последние N эпох без mosaic / mixup / copy_paste
+mixup: 0.0                     # вероятность mixup
+copy_paste: 0.0                # вероятность вставки каждого объекта другой картинки (прямоугольной вырезкой)
+degrees: 0.0                   # поворот, +- градусы
+translate: 0.1                 # сдвиг, +- доля размера
+scale: 0.5                     # масштаб, +- доля
+shear: 0.0                     # скос, +- градусы
+perspective: 0.0               # перспектива, +- доля (0 - 0.001)
+hsv_h: 0.015                   # оттенок, +- доля
+hsv_s: 0.7                     # насыщенность, +- доля
+hsv_v: 0.4                     # яркость, +- доля
+flipud: 0.0                    # вероятность отражения сверху вниз
+fliplr: 0.5                    # вероятность отражения слева направо
+
+project: runs
+name: exp
+exist_ok: false
+
+conf: 0.25                     # val по умолчанию использует 0.001
+topk: 100
+save: true                     # predict: сохранять картинки с боксами
